@@ -1,0 +1,22 @@
+# Example Mining Pool Configuration
+# DevInsiderCoin
+
+[pool]
+name = "DVC Mining Pool"
+algorithm = "sha256d"
+
+[node]
+rpc_host = "127.0.0.1"
+rpc_port = 9334
+
+[mining]
+# Payout address for pool operator fee
+fee_address = "DVC..."
+fee_percent = 1.0
+
+# Minimum payout threshold
+min_payout = 1.0
+
+[workers]
+# Worker difficulty (compact bits)
+default_difficulty = 520159231

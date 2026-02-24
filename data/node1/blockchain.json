@@ -1,0 +1,34 @@
+{
+  "blocks": [
+    {
+      "header": {
+        "version": 1,
+        "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "merkle_root": "10670b6714168ab93cd2624a3e5e42c5c2170a39813cc54947c7f81fe249d416",
+        "timestamp": 1771891200,
+        "bits": 520159231,
+        "nonce": 0,
+        "height": 0
+      },
+      "transactions": [
+        {
+          "txid": "d7258e4e5c642fd0b1fff5dfdde654bf220a8fd0ed0cb52c92d57df498773bb7",
+          "type": "coinbase",
+          "to": "genesis",
+          "amount": 0,
+          "fee": 0,
+          "timestamp": 1771891200,
+          "outputs": [
+            {
+              "address": "genesis",
+              "amount": 0
+            }
+          ]
+        }
+      ],
+      "hash": "3a15f07c3bc28bd58d354830b94ba835d0c77849c7777e91c8819b47e7b13d82"
+    }
+  ],
+  "balances": {},
+  "stakes": {}
+}

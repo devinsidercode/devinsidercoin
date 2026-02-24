@@ -1,0 +1,40 @@
+{
+    "coin": {
+        "name": "DevInsiderCoin Testnet",
+        "ticker": "tDVC",
+        "algorithm": "SHA-256d (Double SHA-256)",
+        "consensus": "Hybrid PoW + PoS",
+        "max_supply": 21000000,
+        "decimals": 8,
+        "genesis_date": "2026-02-24T00:00:00Z"
+    },
+    "pow": {
+        "algorithm": "sha256d",
+        "block_time_seconds": 60,
+        "initial_block_reward": 50.0,
+        "pow_share": 0.6,
+        "halving_interval_blocks": 210000,
+        "difficulty_adjustment_interval": 36,
+        "min_difficulty_bits": "0x1F00FFFF"
+    },
+    "pos": {
+        "pos_share": 0.4,
+        "min_stake_amount": 1.0,
+        "stake_lock_blocks": 10,
+        "distribution": "proportional to staked amount"
+    },
+    "network": {
+        "network_id": 2,
+        "protocol_version": 1,
+        "p2p_port": 19333,
+        "rpc_port": 19334,
+        "address_prefix": "tDVC",
+        "p2p_protocol": "JSON over TCP"
+    },
+    "genesis": {
+        "message": "DevInsiderCoin Testnet Genesis 2026",
+        "timestamp": "2026-02-24T00:00:00Z",
+        "initial_difficulty_bits": 520159231,
+        "coinbase_reward": 0
+    }
+}
