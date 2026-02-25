@@ -1,7 +1,12 @@
 {
-  "DVCERca43BAuoa6tBVw1Wc57dNYApr": {
-    "address": "DVCERca43BAuoa6tBVw1Wc57dNYApr",
-    "public_key": "e3681f8e6d39685e6b8e6f2e7d6841fdcdd0bfa88b056b1f2eb79ea2f91007b5",
-    "private_key": "5bb3733e915eeda140bd7b41073aa6d2231b732252884494700c968f2e27efc2e3681f8e6d39685e6b8e6f2e7d6841fdcdd0bfa88b056b1f2eb79ea2f91007b5"
+  "DVC2gsiBouN9yu9ie1qYpWyfn76DGxo": {
+    "address": "DVC2gsiBouN9yu9ie1qYpWyfn76DGxo",
+    "public_key": "7f88ba8fe14f328e880a724168088b5dc1ee05ef1c8ca7f18a89f7867d9ed131",
+    "private_key": "af1fc8b14e8a67ff2352fa8c2a8dac8c4bd94aec5c4bd60afd054181861c1d3a7f88ba8fe14f328e880a724168088b5dc1ee05ef1c8ca7f18a89f7867d9ed131"
+  },
+  "DVCN2DWhYm6WvfHsY4f6rEX4867E7w": {
+    "address": "DVCN2DWhYm6WvfHsY4f6rEX4867E7w",
+    "public_key": "776a9e86ebed57ea2945d885959b15cb5b0fa22665cfcef1894784d7e6eeaf40",
+    "private_key": "4f00db626ffc3e1c9e7a48e2fbe1b05b8f20d53cefc3ad718ec68049996e0b4a776a9e86ebed57ea2945d885959b15cb5b0fa22665cfcef1894784d7e6eeaf40"
   }
 }

@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"devinsidercoin/internal/config"
+	"devinsidercoin/internal/storage"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,114 +13,225 @@ import (
 	"time"
 )
 
-// ChainData is the persistent on-disk format.
-type ChainData struct {
+// Blockchain manages the chain state.
+type Blockchain struct {
+	Config      *config.NetworkConfig
+	Store       *storage.Store
+	Balances    map[string]float64
+	Stakes      *StakeManager
+	Mempool     []Transaction
+	TotalMinted float64
+	DataDir     string
+	mu          sync.RWMutex
+	lastBlock   *Block
+}
+
+// NewBlockchain creates or loads a blockchain.
+func NewBlockchain(cfg *config.NetworkConfig, dataDir string) *Blockchain {
+	store, err := storage.NewStore(dataDir)
+	if err != nil {
+		log.Fatalf("[CHAIN] Failed to open database: %v", err)
+	}
+
+	bc := &Blockchain{
+		Config:   cfg,
+		Store:    store,
+		Balances: make(map[string]float64),
+		Stakes:   NewStakeManager(),
+		Mempool:  make([]Transaction, 0),
+		DataDir:  dataDir,
+	}
+
+	if !store.HasData() {
+		if bc.migrateFromJSON() {
+			log.Printf("[CHAIN] Migrated from blockchain.json to BoltDB")
+		} else {
+			genesis := CreateGenesisBlock(cfg)
+			blockJSON, _ := json.Marshal(genesis)
+			commit := &storage.BlockCommit{
+				Height:      0,
+				Hash:        genesis.Hash,
+				BlockJSON:   blockJSON,
+				Balances:    bc.Balances,
+				TxIDs:       collectTxIDs(genesis),
+				TotalMinted: 0,
+			}
+			if err := store.CommitBlock(commit); err != nil {
+				log.Fatalf("[CHAIN] Failed to write genesis: %v", err)
+			}
+			bc.lastBlock = genesis
+			log.Printf("[CHAIN] Created genesis block: %s", genesis.Hash)
+		}
+	} else {
+		bc.Balances = store.GetAllBalances()
+		bc.TotalMinted = store.GetTotalMinted()
+		bc.loadStakesFromDB()
+		bc.lastBlock = bc.loadBlock(uint64(store.GetBestHeight()))
+		log.Printf("[CHAIN] Loaded %d blocks from BoltDB (minted: %.2f / %.2f)",
+			store.GetBlockCount(), bc.TotalMinted, cfg.MaxSupply)
+	}
+
+	return bc
+}
+
+func (bc *Blockchain) Close() {
+	if bc.Store != nil {
+		bc.Store.Close()
+	}
+}
+
+func collectTxIDs(block *Block) []string {
+	ids := make([]string, len(block.Transactions))
+	for i, tx := range block.Transactions {
+		ids[i] = tx.TxID
+	}
+	return ids
+}
+
+func (bc *Blockchain) loadBlock(height uint64) *Block {
+	data, err := bc.Store.GetBlockByHeight(height)
+	if err != nil {
+		return nil
+	}
+	var block Block
+	if err := json.Unmarshal(data, &block); err != nil {
+		return nil
+	}
+	return &block
+}
+
+func (bc *Blockchain) loadStakesFromDB() {
+	raw := bc.Store.GetAllStakesRaw()
+	for addr, data := range raw {
+		var s Stake
+		if json.Unmarshal(data, &s) == nil {
+			bc.Stakes.Stakes[addr] = &s
+		}
+	}
+}
+
+// --- Migration from old JSON format ---
+
+type oldChainData struct {
 	Blocks      []*Block           `json:"blocks"`
 	Balances    map[string]float64 `json:"balances"`
 	Stakes      map[string]*Stake  `json:"stakes"`
 	TotalMinted float64            `json:"total_minted"`
 }
 
-// Blockchain manages the chain state.
-type Blockchain struct {
-	Config      *config.NetworkConfig
-	Blocks      []*Block
-	Balances    map[string]float64
-	Stakes      *StakeManager
-	Mempool     []Transaction
-	TxIndex     map[string]*Transaction // txid -> tx
-	TotalMinted float64                 // total coins ever minted
-	DataDir     string
-	mu          sync.RWMutex
+func (bc *Blockchain) migrateFromJSON() bool {
+	jsonPath := filepath.Join(bc.DataDir, "blockchain.json")
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return false
+	}
+	var data oldChainData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return false
+	}
+	if len(data.Blocks) == 0 {
+		return false
+	}
+
+	log.Printf("[CHAIN] Migrating %d blocks from JSON to BoltDB...", len(data.Blocks))
+
+	for i, block := range data.Blocks {
+		blockJSON, _ := json.Marshal(block)
+		commit := &storage.BlockCommit{
+			Height:    block.Header.Height,
+			Hash:      block.Hash,
+			BlockJSON: blockJSON,
+			TxIDs:     collectTxIDs(block),
+		}
+		// On last block, include all state.
+		if i == len(data.Blocks)-1 {
+			commit.Balances = data.Balances
+			commit.TotalMinted = data.TotalMinted
+			if data.Stakes != nil {
+				stakeMap := make(map[string][]byte)
+				for addr, s := range data.Stakes {
+					sJSON, _ := json.Marshal(s)
+					stakeMap[addr] = sJSON
+				}
+				commit.Stakes = stakeMap
+			}
+		}
+		if err := bc.Store.CommitBlock(commit); err != nil {
+			log.Printf("[CHAIN] Migration error at block %d: %v", block.Header.Height, err)
+			return false
+		}
+	}
+
+	if data.Balances != nil {
+		bc.Balances = data.Balances
+	}
+	if data.Stakes != nil {
+		for addr, s := range data.Stakes {
+			bc.Stakes.Stakes[addr] = s
+		}
+	}
+	bc.TotalMinted = data.TotalMinted
+	bc.lastBlock = data.Blocks[len(data.Blocks)-1]
+
+	backupPath := jsonPath + ".migrated"
+	os.Rename(jsonPath, backupPath)
+	log.Printf("[CHAIN] Old blockchain.json renamed to %s", backupPath)
+	return true
 }
 
-// NewBlockchain creates or loads a blockchain.
-func NewBlockchain(cfg *config.NetworkConfig, dataDir string) *Blockchain {
-	bc := &Blockchain{
-		Config:   cfg,
-		Blocks:   make([]*Block, 0),
-		Balances: make(map[string]float64),
-		Stakes:   NewStakeManager(),
-		Mempool:  make([]Transaction, 0),
-		TxIndex:  make(map[string]*Transaction),
-		DataDir:  dataDir,
-	}
-	if err := bc.loadFromDisk(); err != nil {
-		genesis := CreateGenesisBlock(cfg)
-		bc.Blocks = append(bc.Blocks, genesis)
-		bc.indexBlockTxs(genesis)
-		bc.saveToDisk()
-		log.Printf("[CHAIN] Created genesis block: %s", genesis.Hash)
-	} else {
-		log.Printf("[CHAIN] Loaded %d blocks from disk (minted: %.2f / %.2f)",
-			len(bc.Blocks), bc.TotalMinted, cfg.MaxSupply)
-	}
-	return bc
-}
+// --- Public API ---
 
-func (bc *Blockchain) indexBlockTxs(block *Block) {
-	for i := range block.Transactions {
-		tx := &block.Transactions[i]
-		bc.TxIndex[tx.TxID] = tx
-	}
-}
-
-// GetBestHeight returns the height of the latest block.
 func (bc *Blockchain) GetBestHeight() uint64 {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	if len(bc.Blocks) == 0 {
+	h := bc.Store.GetBestHeight()
+	if h < 0 {
 		return 0
 	}
-	return bc.Blocks[len(bc.Blocks)-1].Header.Height
+	return uint64(h)
 }
 
-// GetBestBlock returns the latest block.
 func (bc *Blockchain) GetBestBlock() *Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	if len(bc.Blocks) == 0 {
-		return nil
-	}
-	return bc.Blocks[len(bc.Blocks)-1]
+	return bc.lastBlock
 }
 
-// GetBlockByHeight returns a block at the given height.
 func (bc *Blockchain) GetBlockByHeight(height uint64) *Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	if height >= uint64(len(bc.Blocks)) {
-		return nil
-	}
-	return bc.Blocks[height]
+	return bc.loadBlock(height)
 }
 
-// GetBlockByHash returns a block by hash.
 func (bc *Blockchain) GetBlockByHash(hash string) *Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	for _, b := range bc.Blocks {
-		if b.Hash == hash {
-			return b
-		}
+	data, err := bc.Store.GetBlockByHash(hash)
+	if err != nil {
+		return nil
 	}
-	return nil
+	var block Block
+	json.Unmarshal(data, &block)
+	return &block
 }
 
-// GetBalance returns the balance of an address.
 func (bc *Blockchain) GetBalance(address string) float64 {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.Balances[address]
 }
 
-// GetTransactions returns all transactions involving an address.
 func (bc *Blockchain) GetTransactions(address string) []Transaction {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	var result []Transaction
-	for _, b := range bc.Blocks {
-		for _, tx := range b.Transactions {
+	count := bc.Store.GetBlockCount()
+	for h := uint64(0); h < count; h++ {
+		block := bc.loadBlock(h)
+		if block == nil {
+			continue
+		}
+		for _, tx := range block.Transactions {
 			if tx.From == address || tx.To == address {
 				result = append(result, tx)
 				continue
@@ -135,27 +247,22 @@ func (bc *Blockchain) GetTransactions(address string) []Transaction {
 	return result
 }
 
-// GetBlockCount returns total number of blocks.
 func (bc *Blockchain) GetBlockCount() uint64 {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	return uint64(len(bc.Blocks))
+	return bc.Store.GetBlockCount()
 }
 
-// GetTotalMinted returns total coins minted so far.
 func (bc *Blockchain) GetTotalMinted() float64 {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 	return bc.TotalMinted
 }
 
-// CalcBlockReward returns the block reward at given height, enforcing max supply.
 func (bc *Blockchain) CalcBlockReward(height uint64) float64 {
-	// All coins minted — no more rewards.
 	if bc.TotalMinted >= bc.Config.MaxSupply {
 		return 0
 	}
-
 	halvings := height / bc.Config.HalvingInterval
 	reward := bc.Config.InitialReward
 	for i := uint64(0); i < halvings; i++ {
@@ -164,17 +271,13 @@ func (bc *Blockchain) CalcBlockReward(height uint64) float64 {
 	if reward < 0.00000001 {
 		return 0
 	}
-
-	// Cap reward so we never exceed max supply.
 	remaining := bc.Config.MaxSupply - bc.TotalMinted
 	if reward > remaining {
 		reward = remaining
 	}
-
 	return reward
 }
 
-// AddToMempool adds a transaction to the mempool after validation.
 func (bc *Blockchain) AddToMempool(tx Transaction) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -192,7 +295,6 @@ func (bc *Blockchain) AddToMempool(tx Transaction) error {
 		if tx.Amount < bc.Config.MinStakeAmount {
 			return fmt.Errorf("minimum stake is %.2f %s", bc.Config.MinStakeAmount, bc.Config.Ticker)
 		}
-		// Also check that total stake after this tx meets the threshold.
 		totalStake := bc.Stakes.GetStake(tx.From) + tx.Amount
 		if totalStake < bc.Config.POSMinThreshold {
 			return fmt.Errorf("total stake must be at least %.2f %s to participate in PoS",
@@ -203,7 +305,6 @@ func (bc *Blockchain) AddToMempool(tx Transaction) error {
 	return nil
 }
 
-// GetMempool returns a copy of the mempool.
 func (bc *Blockchain) GetMempool() []Transaction {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
@@ -212,19 +313,17 @@ func (bc *Blockchain) GetMempool() []Transaction {
 	return cp
 }
 
-// CreateBlockTemplate builds a new block ready for mining.
 func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
 
-	height := uint64(len(bc.Blocks))
+	height := bc.Store.GetBlockCount()
 	prevHash := strings.Repeat("0", 64)
 	prevBits := bc.Config.MinDifficultyBits
 
-	if len(bc.Blocks) > 0 {
-		last := bc.Blocks[len(bc.Blocks)-1]
-		prevHash = last.Hash
-		prevBits = last.Header.Bits
+	if bc.lastBlock != nil && height > 0 {
+		prevHash = bc.lastBlock.Hash
+		prevBits = bc.lastBlock.Header.Bits
 	}
 
 	totalReward := bc.CalcBlockReward(height)
@@ -232,12 +331,9 @@ func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 	posReward := totalReward * bc.Config.POSRewardShare
 
 	var txs []Transaction
-
-	// PoS rewards — only stakers above POSMinThreshold.
 	posOutputs := bc.Stakes.CalcPOSRewards(posReward, bc.Config.POSMinThreshold)
 	if len(posOutputs) > 0 {
-		coinbase := NewCoinbaseTransaction(minerAddress, powReward, height)
-		txs = append(txs, coinbase)
+		txs = append(txs, NewCoinbaseTransaction(minerAddress, powReward, height))
 		posTx := Transaction{
 			Type:      "pos_reward",
 			Amount:    posReward,
@@ -247,11 +343,9 @@ func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 		posTx.TxID = posTx.ComputeTxID()
 		txs = append(txs, posTx)
 	} else {
-		coinbase := NewCoinbaseTransaction(minerAddress, totalReward, height)
-		txs = append(txs, coinbase)
+		txs = append(txs, NewCoinbaseTransaction(minerAddress, totalReward, height))
 	}
 
-	// Add mempool txs (up to max block transactions).
 	maxTxs := int(bc.Config.MaxBlockTransactions) - len(txs)
 	if maxTxs > len(bc.Mempool) {
 		maxTxs = len(bc.Mempool)
@@ -260,19 +354,14 @@ func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 		txs = append(txs, bc.Mempool[:maxTxs]...)
 	}
 
-	// Difficulty retarget.
 	bits := prevBits
 	if height > 0 && height%bc.Config.DifficultyAdjustInterval == 0 {
-		bits = CalcNextBits(bc.Blocks, bc.Config.DifficultyAdjustInterval,
-			bc.Config.BlockTimeSeconds, bc.Config.MinDifficultyBits)
+		bits = bc.calcNextBitsFromDB()
 	}
-
-	// Apply progressive difficulty floor.
 	bits = ApplyProgressiveDifficulty(bits, height,
 		bc.Config.DifficultyEpochBlocks, bc.Config.MinDifficultyBits)
 
 	merkle := ComputeMerkleRoot(txs)
-
 	header := BlockHeader{
 		Version:    2,
 		PrevHash:   prevHash,
@@ -282,11 +371,28 @@ func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 		Nonce:      0,
 		Height:     height,
 	}
-
 	return &Block{Header: header, Transactions: txs}
 }
 
-// AddBlock validates and adds a block to the chain.
+func (bc *Blockchain) calcNextBitsFromDB() uint32 {
+	interval := bc.Config.DifficultyAdjustInterval
+	rawBlocks, err := bc.Store.GetRecentBlocks(interval)
+	if err != nil || uint64(len(rawBlocks)) < interval {
+		if bc.lastBlock != nil {
+			return bc.lastBlock.Header.Bits
+		}
+		return bc.Config.MinDifficultyBits
+	}
+	blocks := make([]*Block, len(rawBlocks))
+	for i, raw := range rawBlocks {
+		var b Block
+		json.Unmarshal(raw, &b)
+		blocks[i] = &b
+	}
+	return CalcNextBits(blocks, interval,
+		bc.Config.BlockTimeSeconds, bc.Config.MinDifficultyBits)
+}
+
 func (bc *Blockchain) AddBlock(block *Block) error {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
@@ -295,37 +401,64 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Track minted coins in this block.
+	changedBalances := make(map[string]float64)
+	changedStakes := make(map[string][]byte)
 	var blockMinted float64
 
-	// Apply transactions.
 	for _, tx := range block.Transactions {
 		switch tx.Type {
 		case "coinbase":
 			for _, out := range tx.Outputs {
 				bc.Balances[out.Address] += out.Amount
+				changedBalances[out.Address] = bc.Balances[out.Address]
 				blockMinted += out.Amount
 			}
 		case "pos_reward":
 			for _, out := range tx.Outputs {
 				bc.Balances[out.Address] += out.Amount
+				changedBalances[out.Address] = bc.Balances[out.Address]
 				blockMinted += out.Amount
 			}
 		case "transfer":
 			bc.Balances[tx.From] -= tx.Amount + tx.Fee
 			bc.Balances[tx.To] += tx.Amount
+			changedBalances[tx.From] = bc.Balances[tx.From]
+			changedBalances[tx.To] = bc.Balances[tx.To]
 		case "stake":
 			bc.Balances[tx.From] -= tx.Amount
+			changedBalances[tx.From] = bc.Balances[tx.From]
 			bc.Stakes.AddStake(tx.From, tx.Amount, block.Header.Height)
+			sJSON, _ := json.Marshal(bc.Stakes.Stakes[tx.From])
+			changedStakes[tx.From] = sJSON
 		case "unstake":
 			bc.Stakes.RemoveStake(tx.From, tx.Amount)
 			bc.Balances[tx.From] += tx.Amount
+			changedBalances[tx.From] = bc.Balances[tx.From]
+			if s, ok := bc.Stakes.Stakes[tx.From]; ok {
+				sJSON, _ := json.Marshal(s)
+				changedStakes[tx.From] = sJSON
+			} else {
+				changedStakes[tx.From] = nil
+			}
 		}
 	}
 
 	bc.TotalMinted += blockMinted
 
-	// Clear processed txs from mempool.
+	blockJSON, _ := json.Marshal(block)
+	commit := &storage.BlockCommit{
+		Height:      block.Header.Height,
+		Hash:        block.Hash,
+		BlockJSON:   blockJSON,
+		Balances:    changedBalances,
+		Stakes:      changedStakes,
+		TxIDs:       collectTxIDs(block),
+		TotalMinted: bc.TotalMinted,
+	}
+	if err := bc.Store.CommitBlock(commit); err != nil {
+		return fmt.Errorf("db commit failed: %w", err)
+	}
+
 	processed := make(map[string]bool)
 	for _, tx := range block.Transactions {
 		processed[tx.TxID] = true
@@ -337,10 +470,7 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 		}
 	}
 	bc.Mempool = remaining
-
-	bc.Blocks = append(bc.Blocks, block)
-	bc.indexBlockTxs(block)
-	bc.saveToDisk()
+	bc.lastBlock = block
 
 	log.Printf("[CHAIN] Block #%d added: %s (txs: %d, minted: %.2f, total: %.2f/%.2f)",
 		block.Header.Height, block.Hash[:16]+"...", len(block.Transactions),
@@ -349,13 +479,12 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 }
 
 func (bc *Blockchain) validateBlock(block *Block) error {
-	expectedHeight := uint64(len(bc.Blocks))
+	expectedHeight := bc.Store.GetBlockCount()
 	if block.Header.Height != expectedHeight {
 		return fmt.Errorf("bad height: expected %d, got %d", expectedHeight, block.Header.Height)
 	}
-	if expectedHeight > 0 {
-		prev := bc.Blocks[len(bc.Blocks)-1]
-		if block.Header.PrevHash != prev.Hash {
+	if expectedHeight > 0 && bc.lastBlock != nil {
+		if block.Header.PrevHash != bc.lastBlock.Hash {
 			return fmt.Errorf("bad prev hash")
 		}
 	}
@@ -366,7 +495,6 @@ func (bc *Blockchain) validateBlock(block *Block) error {
 	if !CheckProofOfWork(block.Hash, block.Header.Bits) {
 		return fmt.Errorf("insufficient proof of work")
 	}
-	// Block size limits.
 	if uint64(len(block.Transactions)) > bc.Config.MaxBlockTransactions {
 		return fmt.Errorf("too many transactions: %d > %d",
 			len(block.Transactions), bc.Config.MaxBlockTransactions)
@@ -376,7 +504,6 @@ func (bc *Blockchain) validateBlock(block *Block) error {
 		return fmt.Errorf("block too large: %d bytes > %d",
 			len(blockData), bc.Config.MaxBlockSize)
 	}
-	// Validate progressive difficulty floor.
 	floorBits := ProgressiveDifficultyFloor(block.Header.Height,
 		bc.Config.DifficultyEpochBlocks, bc.Config.MinDifficultyBits)
 	blockTarget := BitsToTarget(block.Header.Bits)
@@ -387,52 +514,19 @@ func (bc *Blockchain) validateBlock(block *Block) error {
 	return nil
 }
 
-// GetBlocks returns blocks from startHeight to the tip.
 func (bc *Blockchain) GetBlocks(startHeight uint64) []*Block {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-	if startHeight >= uint64(len(bc.Blocks)) {
+	rawBlocks, err := bc.Store.GetBlocksFrom(startHeight)
+	if err != nil {
 		return nil
 	}
-	result := make([]*Block, len(bc.Blocks)-int(startHeight))
-	copy(result, bc.Blocks[startHeight:])
-	return result
-}
-
-func (bc *Blockchain) saveToDisk() {
-	os.MkdirAll(bc.DataDir, 0755)
-	data := ChainData{
-		Blocks:      bc.Blocks,
-		Balances:    bc.Balances,
-		Stakes:      bc.Stakes.GetAllStakes(),
-		TotalMinted: bc.TotalMinted,
-	}
-	raw, _ := json.MarshalIndent(data, "", "  ")
-	os.WriteFile(filepath.Join(bc.DataDir, "blockchain.json"), raw, 0644)
-}
-
-func (bc *Blockchain) loadFromDisk() error {
-	raw, err := os.ReadFile(filepath.Join(bc.DataDir, "blockchain.json"))
-	if err != nil {
-		return err
-	}
-	var data ChainData
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return err
-	}
-	if len(data.Blocks) == 0 {
-		return fmt.Errorf("empty chain data")
-	}
-	bc.Blocks = data.Blocks
-	bc.Balances = data.Balances
-	bc.TotalMinted = data.TotalMinted
-	if data.Stakes != nil {
-		for k, v := range data.Stakes {
-			bc.Stakes.Stakes[k] = v
+	blocks := make([]*Block, 0, len(rawBlocks))
+	for _, raw := range rawBlocks {
+		var b Block
+		if json.Unmarshal(raw, &b) == nil {
+			blocks = append(blocks, &b)
 		}
 	}
-	for _, b := range bc.Blocks {
-		bc.indexBlockTxs(b)
-	}
-	return nil
+	return blocks
 }
