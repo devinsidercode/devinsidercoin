@@ -28,6 +28,10 @@ type NetworkConfig struct {
 	ProtocolVersion          uint32  `json:"protocol_version"`
 	MinStakeAmount           float64 `json:"min_stake_amount"`
 	StakeLockBlocks          uint64  `json:"stake_lock_blocks"`
+	MaxBlockSize             uint64  `json:"max_block_size"`
+	MaxBlockTransactions     uint64  `json:"max_block_transactions"`
+	POSMinThreshold          float64 `json:"pos_min_threshold"`
+	DifficultyEpochBlocks    uint64  `json:"difficulty_epoch_blocks"`
 }
 
 // LoadConfig reads a network configuration from a JSON file.
@@ -39,6 +43,19 @@ func LoadConfig(path string) (*NetworkConfig, error) {
 	var cfg NetworkConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
+	}
+	// Defaults for backward compatibility
+	if cfg.MaxBlockSize == 0 {
+		cfg.MaxBlockSize = 8 * 1024 * 1024 // 8 MB
+	}
+	if cfg.MaxBlockTransactions == 0 {
+		cfg.MaxBlockTransactions = 10000
+	}
+	if cfg.POSMinThreshold == 0 {
+		cfg.POSMinThreshold = 100.0
+	}
+	if cfg.DifficultyEpochBlocks == 0 {
+		cfg.DifficultyEpochBlocks = 500000
 	}
 	return &cfg, nil
 }

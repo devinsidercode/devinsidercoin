@@ -73,20 +73,30 @@ func (sm *StakeManager) GetStake(address string) float64 {
 	return 0
 }
 
-// CalcPOSRewards distributes PoS reward proportionally among stakers.
-func (sm *StakeManager) CalcPOSRewards(totalReward float64) []TxOutput {
+// CalcPOSRewards distributes PoS reward proportionally among stakers
+// whose stake is at or above minThreshold. Stakers below the threshold
+// are excluded from rewards entirely.
+func (sm *StakeManager) CalcPOSRewards(totalReward float64, minThreshold float64) []TxOutput {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	totalStaked := 0.0
+
+	// Calculate total eligible stake (only stakers >= minThreshold).
+	eligibleStaked := 0.0
 	for _, s := range sm.Stakes {
-		totalStaked += s.Amount
+		if s.Amount >= minThreshold {
+			eligibleStaked += s.Amount
+		}
 	}
-	if totalStaked == 0 {
+	if eligibleStaked == 0 {
 		return nil
 	}
+
 	var outputs []TxOutput
 	for addr, s := range sm.Stakes {
-		share := s.Amount / totalStaked
+		if s.Amount < minThreshold {
+			continue // below threshold — no rewards
+		}
+		share := s.Amount / eligibleStaked
 		reward := totalReward * share
 		if reward > 0.00000001 {
 			outputs = append(outputs, TxOutput{Address: addr, Amount: reward})

@@ -166,7 +166,7 @@ func (n *Node) handlePeer(conn net.Conn) {
 	peer.Send(Message{Type: "version", Payload: vp})
 
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 10*1024*1024), 10*1024*1024)
 
 	for scanner.Scan() {
 		var msg Message

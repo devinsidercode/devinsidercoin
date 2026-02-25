@@ -67,10 +67,12 @@ curl "http://localhost:19334/api/wallet/balance?address=tDVC_YOUR_ADDRESS"
 
 ## Block Rewards
 
-- Initial: **50 DVC** per block
+- Initial: **250,000 DVC** per block
 - **60% PoW** (miner) + **40% PoS** (stakers)
-- Halving every 210,000 blocks
+- Halving every **2,100,000 blocks** (~8 years mainnet)
+- Max supply: **2^40 = 1,099,511,627,776 DVC**
 - Testnet: 1-minute blocks | Mainnet: 2-minute blocks
+- PoS reward threshold: **100 DVC** (mainnet) / **10 tDVC** (testnet) — below = no rewards
 
 ## Staking (PoS)
 
@@ -88,4 +90,4 @@ curl -X POST http://localhost:19334/api/wallet/unstake \
   -d '{"address": "DVC...", "amount": 50}'
 ```
 
-Minimum stake: 10 DVC (mainnet) / 1 tDVC (testnet).
+Minimum stake: **1,000 DVC** (mainnet) / **100 tDVC** (testnet).

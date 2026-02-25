@@ -14,21 +14,23 @@ import (
 
 // ChainData is the persistent on-disk format.
 type ChainData struct {
-	Blocks   []*Block           `json:"blocks"`
-	Balances map[string]float64 `json:"balances"`
-	Stakes   map[string]*Stake  `json:"stakes"`
+	Blocks      []*Block           `json:"blocks"`
+	Balances    map[string]float64 `json:"balances"`
+	Stakes      map[string]*Stake  `json:"stakes"`
+	TotalMinted float64            `json:"total_minted"`
 }
 
 // Blockchain manages the chain state.
 type Blockchain struct {
-	Config   *config.NetworkConfig
-	Blocks   []*Block
-	Balances map[string]float64
-	Stakes   *StakeManager
-	Mempool  []Transaction
-	TxIndex  map[string]*Transaction // txid -> tx
-	DataDir  string
-	mu       sync.RWMutex
+	Config      *config.NetworkConfig
+	Blocks      []*Block
+	Balances    map[string]float64
+	Stakes      *StakeManager
+	Mempool     []Transaction
+	TxIndex     map[string]*Transaction // txid -> tx
+	TotalMinted float64                 // total coins ever minted
+	DataDir     string
+	mu          sync.RWMutex
 }
 
 // NewBlockchain creates or loads a blockchain.
@@ -49,7 +51,8 @@ func NewBlockchain(cfg *config.NetworkConfig, dataDir string) *Blockchain {
 		bc.saveToDisk()
 		log.Printf("[CHAIN] Created genesis block: %s", genesis.Hash)
 	} else {
-		log.Printf("[CHAIN] Loaded %d blocks from disk", len(bc.Blocks))
+		log.Printf("[CHAIN] Loaded %d blocks from disk (minted: %.2f / %.2f)",
+			len(bc.Blocks), bc.TotalMinted, cfg.MaxSupply)
 	}
 	return bc
 }
@@ -139,8 +142,20 @@ func (bc *Blockchain) GetBlockCount() uint64 {
 	return uint64(len(bc.Blocks))
 }
 
-// CalcBlockReward returns the block reward at given height.
+// GetTotalMinted returns total coins minted so far.
+func (bc *Blockchain) GetTotalMinted() float64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.TotalMinted
+}
+
+// CalcBlockReward returns the block reward at given height, enforcing max supply.
 func (bc *Blockchain) CalcBlockReward(height uint64) float64 {
+	// All coins minted — no more rewards.
+	if bc.TotalMinted >= bc.Config.MaxSupply {
+		return 0
+	}
+
 	halvings := height / bc.Config.HalvingInterval
 	reward := bc.Config.InitialReward
 	for i := uint64(0); i < halvings; i++ {
@@ -149,6 +164,13 @@ func (bc *Blockchain) CalcBlockReward(height uint64) float64 {
 	if reward < 0.00000001 {
 		return 0
 	}
+
+	// Cap reward so we never exceed max supply.
+	remaining := bc.Config.MaxSupply - bc.TotalMinted
+	if reward > remaining {
+		reward = remaining
+	}
+
 	return reward
 }
 
@@ -169,6 +191,12 @@ func (bc *Blockchain) AddToMempool(tx Transaction) error {
 		}
 		if tx.Amount < bc.Config.MinStakeAmount {
 			return fmt.Errorf("minimum stake is %.2f %s", bc.Config.MinStakeAmount, bc.Config.Ticker)
+		}
+		// Also check that total stake after this tx meets the threshold.
+		totalStake := bc.Stakes.GetStake(tx.From) + tx.Amount
+		if totalStake < bc.Config.POSMinThreshold {
+			return fmt.Errorf("total stake must be at least %.2f %s to participate in PoS",
+				bc.Config.POSMinThreshold, bc.Config.Ticker)
 		}
 	}
 	bc.Mempool = append(bc.Mempool, tx)
@@ -205,8 +233,8 @@ func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 
 	var txs []Transaction
 
-	// PoS rewards
-	posOutputs := bc.Stakes.CalcPOSRewards(posReward)
+	// PoS rewards — only stakers above POSMinThreshold.
+	posOutputs := bc.Stakes.CalcPOSRewards(posReward, bc.Config.POSMinThreshold)
 	if len(posOutputs) > 0 {
 		coinbase := NewCoinbaseTransaction(minerAddress, powReward, height)
 		txs = append(txs, coinbase)
@@ -223,20 +251,30 @@ func (bc *Blockchain) CreateBlockTemplate(minerAddress string) *Block {
 		txs = append(txs, coinbase)
 	}
 
-	// Add mempool txs
-	txs = append(txs, bc.Mempool...)
+	// Add mempool txs (up to max block transactions).
+	maxTxs := int(bc.Config.MaxBlockTransactions) - len(txs)
+	if maxTxs > len(bc.Mempool) {
+		maxTxs = len(bc.Mempool)
+	}
+	if maxTxs > 0 {
+		txs = append(txs, bc.Mempool[:maxTxs]...)
+	}
 
-	// Difficulty
+	// Difficulty retarget.
 	bits := prevBits
 	if height > 0 && height%bc.Config.DifficultyAdjustInterval == 0 {
 		bits = CalcNextBits(bc.Blocks, bc.Config.DifficultyAdjustInterval,
 			bc.Config.BlockTimeSeconds, bc.Config.MinDifficultyBits)
 	}
 
+	// Apply progressive difficulty floor.
+	bits = ApplyProgressiveDifficulty(bits, height,
+		bc.Config.DifficultyEpochBlocks, bc.Config.MinDifficultyBits)
+
 	merkle := ComputeMerkleRoot(txs)
 
 	header := BlockHeader{
-		Version:    1,
+		Version:    2,
 		PrevHash:   prevHash,
 		MerkleRoot: merkle,
 		Timestamp:  time.Now().Unix(),
@@ -257,16 +295,21 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	// Apply transactions
+	// Track minted coins in this block.
+	var blockMinted float64
+
+	// Apply transactions.
 	for _, tx := range block.Transactions {
 		switch tx.Type {
 		case "coinbase":
 			for _, out := range tx.Outputs {
 				bc.Balances[out.Address] += out.Amount
+				blockMinted += out.Amount
 			}
 		case "pos_reward":
 			for _, out := range tx.Outputs {
 				bc.Balances[out.Address] += out.Amount
+				blockMinted += out.Amount
 			}
 		case "transfer":
 			bc.Balances[tx.From] -= tx.Amount + tx.Fee
@@ -280,7 +323,9 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 		}
 	}
 
-	// Clear processed txs from mempool
+	bc.TotalMinted += blockMinted
+
+	// Clear processed txs from mempool.
 	processed := make(map[string]bool)
 	for _, tx := range block.Transactions {
 		processed[tx.TxID] = true
@@ -297,8 +342,9 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 	bc.indexBlockTxs(block)
 	bc.saveToDisk()
 
-	log.Printf("[CHAIN] Block #%d added: %s (txs: %d)",
-		block.Header.Height, block.Hash[:16]+"...", len(block.Transactions))
+	log.Printf("[CHAIN] Block #%d added: %s (txs: %d, minted: %.2f, total: %.2f/%.2f)",
+		block.Header.Height, block.Hash[:16]+"...", len(block.Transactions),
+		blockMinted, bc.TotalMinted, bc.Config.MaxSupply)
 	return nil
 }
 
@@ -320,6 +366,24 @@ func (bc *Blockchain) validateBlock(block *Block) error {
 	if !CheckProofOfWork(block.Hash, block.Header.Bits) {
 		return fmt.Errorf("insufficient proof of work")
 	}
+	// Block size limits.
+	if uint64(len(block.Transactions)) > bc.Config.MaxBlockTransactions {
+		return fmt.Errorf("too many transactions: %d > %d",
+			len(block.Transactions), bc.Config.MaxBlockTransactions)
+	}
+	blockData, _ := json.Marshal(block)
+	if uint64(len(blockData)) > bc.Config.MaxBlockSize {
+		return fmt.Errorf("block too large: %d bytes > %d",
+			len(blockData), bc.Config.MaxBlockSize)
+	}
+	// Validate progressive difficulty floor.
+	floorBits := ProgressiveDifficultyFloor(block.Header.Height,
+		bc.Config.DifficultyEpochBlocks, bc.Config.MinDifficultyBits)
+	blockTarget := BitsToTarget(block.Header.Bits)
+	floorTarget := BitsToTarget(floorBits)
+	if blockTarget.Cmp(floorTarget) > 0 {
+		return fmt.Errorf("difficulty below progressive floor at height %d", block.Header.Height)
+	}
 	return nil
 }
 
@@ -338,9 +402,10 @@ func (bc *Blockchain) GetBlocks(startHeight uint64) []*Block {
 func (bc *Blockchain) saveToDisk() {
 	os.MkdirAll(bc.DataDir, 0755)
 	data := ChainData{
-		Blocks:   bc.Blocks,
-		Balances: bc.Balances,
-		Stakes:   bc.Stakes.GetAllStakes(),
+		Blocks:      bc.Blocks,
+		Balances:    bc.Balances,
+		Stakes:      bc.Stakes.GetAllStakes(),
+		TotalMinted: bc.TotalMinted,
 	}
 	raw, _ := json.MarshalIndent(data, "", "  ")
 	os.WriteFile(filepath.Join(bc.DataDir, "blockchain.json"), raw, 0644)
@@ -360,6 +425,7 @@ func (bc *Blockchain) loadFromDisk() error {
 	}
 	bc.Blocks = data.Blocks
 	bc.Balances = data.Balances
+	bc.TotalMinted = data.TotalMinted
 	if data.Stakes != nil {
 		for k, v := range data.Stakes {
 			bc.Stakes.Stakes[k] = v

@@ -4,37 +4,59 @@
         "ticker": "DVC",
         "algorithm": "SHA-256d (Double SHA-256)",
         "consensus": "Hybrid PoW + PoS",
-        "max_supply": 21000000,
+        "max_supply": 1099511627776,
+        "max_supply_note": "2^40 (1,099,511,627,776 DVC)",
         "decimals": 8,
         "genesis_date": "2026-02-24T12:00:00Z"
     },
     "pow": {
         "algorithm": "sha256d",
         "block_time_seconds": 120,
-        "initial_block_reward": 50.0,
+        "initial_block_reward": 250000.0,
         "pow_share": 0.6,
-        "halving_interval_blocks": 210000,
+        "halving_interval_blocks": 2100000,
+        "halving_interval_note": "~8 years at 120s block time",
         "difficulty_adjustment_interval": 72,
-        "min_difficulty_bits": "0x1F00FFFF"
+        "min_difficulty_bits": "0x1F00FFFF",
+        "progressive_difficulty": {
+            "enabled": true,
+            "epoch_blocks": 500000,
+            "description": "Every 500,000 blocks the minimum difficulty doubles, making mining progressively harder over time"
+        },
+        "max_block_size_bytes": 8388608,
+        "max_block_size_note": "8 MB",
+        "max_block_transactions": 10000
     },
     "pos": {
         "pos_share": 0.4,
-        "min_stake_amount": 10.0,
+        "min_stake_amount": 1000.0,
+        "min_stake_note": "Minimum 1,000 DVC to stake",
+        "pos_min_threshold": 100.0,
+        "pos_min_threshold_note": "Stakers below 100 DVC receive no PoS rewards",
         "stake_lock_blocks": 100,
-        "distribution": "proportional to staked amount"
+        "distribution": "proportional to staked amount among eligible stakers"
     },
     "network": {
         "network_id": 1,
-        "protocol_version": 1,
+        "protocol_version": 2,
         "p2p_port": 9333,
         "rpc_port": 9334,
         "address_prefix": "DVC",
-        "p2p_protocol": "JSON over TCP"
+        "p2p_protocol": "JSON over TCP",
+        "p2p_buffer_size": "10 MB"
     },
     "genesis": {
         "message": "DevInsiderCoin Genesis - Internal Company Currency 2026",
         "timestamp": "2026-02-24T12:00:00Z",
         "initial_difficulty_bits": 520159231,
         "coinbase_reward": 0
+    },
+    "economics": {
+        "total_supply": "2^40 = 1,099,511,627,776 DVC",
+        "initial_reward": "250,000 DVC per block",
+        "halving_schedule": "Reward halves every 2,100,000 blocks (~8 years)",
+        "theoretical_emission": "250,000 × 2,100,000 × 2 ≈ 1.05T DVC (capped at 2^40)",
+        "pow_pos_split": "60% PoW miner / 40% PoS stakers",
+        "fee_model": "0.001 DVC per transfer"
     }
 }

@@ -33,15 +33,17 @@ Starting from block #1:
 - **60%** of block reward → PoW miner (who found the block)
 - **40%** of block reward → PoS stakers (proportional to stake)
 - If no eligible stakers exist, PoW miner receives 100% of the reward
-- Initial block reward: **250,000 DVC**
-- Halving every **2,100,000 blocks**
-- Minimum stake: **1,000 DVC** (mainnet) / **100 tDVC** (testnet)
-- PoS reward threshold: **100 DVC** (mainnet) / **10 tDVC** (testnet) — stakers below this receive nothing
+- Minimum stake: **1,000 DVC** (mainnet)
+- PoS reward threshold: **100 DVC** — stakers below this receive nothing
 
 ## Progressive Mining Difficulty
 
-- Every **500,000 blocks** (mainnet) / **250,000 blocks** (testnet), the minimum difficulty doubles
+The network implements a progressive difficulty floor that increases over time:
+
+- Every **500,000 blocks** (~1.9 years), the minimum allowed difficulty doubles
 - This ensures mining becomes progressively harder regardless of hash rate fluctuations
+- The standard difficulty retarget (every 72 blocks) still operates, but cannot drop below the progressive floor
+- Epoch 0: base difficulty | Epoch 1: 2× harder | Epoch 2: 4× harder | Epoch N: 2^N × harder
 
 ## Block Limits
 
@@ -49,5 +51,3 @@ Starting from block #1:
 |---|---|
 | **Max Block Size** | 8 MB (8,388,608 bytes) |
 | **Max Transactions per Block** | 10,000 |
-| **Protocol Version** | 2 |
-| **P2P Buffer Size** | 10 MB |
